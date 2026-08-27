@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RiskPulse Dashboard (Demo)</title>
+
+<!-- React + ReactDOM + Babel via CDN. No build step required -- open this
+     file directly, or serve it with any static file server. -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131824;
+    --panel-border: #232a3a;
+    --text: #e6e9f0;
+    --muted: #8b93a7;
+    --low: #3fb950;
+    --medium: #d2a106;
+    --high: #e8722c;
+    --critical: #e5484d;
+    --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: 0.02em; }
+  header .badge {
+    font-size: 12px;
+    color: var(--muted);
+    border: 1px solid var(--panel-border);
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .conn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .conn-live { background: var(--low); }
+  .conn-poll { background: var(--medium); }
+  .conn-down { background: var(--critical); }
+
+  main {
+    padding: 20px 28px 60px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+  }
+  .full-width { grid-column: 1 / -1; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .stat-value { font-size: 28px; font-weight: 600; }
+  .stat-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--panel-border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  .table-scroll { max-height: 420px; overflow: auto; }
+
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .pill-low { background: rgba(63,185,80,0.15); color: var(--low); }
+  .pill-medium { background: rgba(210,161,6,0.18); color: var(--medium); }
+  .pill-high { background: rgba(232,114,44,0.18); color: var(--high); }
+  .pill-critical { background: rgba(229,72,77,0.18); color: var(--critical); }
+
+  .cat-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; border-bottom: 1px solid var(--panel-border); }
+  .cat-row:last-child { border-bottom: none; }
+  .cat-name { color: var(--text); }
+  .cat-meta { color: var(--muted); }
+
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; }
+  .filters select, .filters input {
+    background: #0e1420; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px;
+  }
+  footer { padding: 16px 28px 40px; color: var(--muted); font-size: 12px; max-width: 900px; line-height: 1.5; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// Change this if your backend runs somewhere other than localhost:8000.
+const API_BASE = window.RISKPULSE_API_BASE || "http://127.0.0.1:8000";
+const WS_BASE = API_BASE.replace(/^http/, "ws");
+const POLL_INTERVAL_MS = 4000;
+const MAX_FEED_ROWS = 200;
+const MAX_CHART_POINTS = 60;
+
+function pillClass(status) {
+  return "pill pill-" + status;
+}
+
+function fmtMoney(n) {
+  return "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString();
+}
+
+// --- Lightweight inline SVG line chart (no external charting library) ------
+function RiskChart({ points }) {
+  const width = 100; // viewBox units, scales responsively via SVG
+  const height = 32;
+  const padding = 2;
+
+  if (points.length < 2) {
+    return <div className="stat-sub">Waiting for enough data to plot a trend&hellip;</div>;
+  }
+
+  const maxScore = 100;
+  const stepX = (width - padding * 2) / (points.length - 1);
+  const coords = points.map((p, i) => {
+    const x = padding + i * stepX;
+    const y = height - padding - (p.risk_score / maxScore) * (height - padding * 2);
+    return [x, y];
+  });
+  const pathD = coords.map(([x, y], i) => (i === 0 ? `M ${x} ${y}` : `L ${x} ${y}`)).join(" ");
+  const areaD = `${pathD} L ${coords[coords.length - 1][0]} ${height} L ${coords[0][0]} ${height} Z`;
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="90" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="riskFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#4f8cff" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="#4f8cff" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {/* gridlines at 25/50/75 */}
+      {[25, 50, 75].map((v) => {
+        const y = height - padding - (v / maxScore) * (height - padding * 2);
+        return <line key={v} x1={padding} y1={y} x2={width - padding} y2={y} stroke="#232a3a" strokeWidth="0.3" />;
+      })}
+      <path d={areaD} fill="url(#riskFill)" stroke="none" />
+      <path d={pathD} fill="none" stroke="#4f8cff" strokeWidth="0.8" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function StatsPanel({ stats }) {
+  if (!stats) return <div className="card"><h2>Summary</h2><div className="stat-sub">Loading&hellip;</div></div>;
+  return (
+    <div className="card">
+      <h2>Summary</h2>
+      <div className="stat-value">{stats.total_records}</div>
+      <div className="stat-sub">total records</div>
+      <div style={{ marginTop: 12 }}>
+        <div className="stat-value" style={{ fontSize: 20 }}>{stats.overall_avg_risk_score.toFixed(1)}</div>
+        <div className="stat-sub">avg risk score (0-100)</div>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <div className="stat-value" style={{ fontSize: 20 }}>{stats.high_risk_last_hour}</div>
+        <div className="stat-sub">high-risk (&ge;75) in last hour</div>
+      </div>
+    </div>
+  );
+}
+
+function StatusBreakdown({ stats }) {
+  if (!stats) return null;
+  const order = ["low", "medium", "high", "critical"];
+  const total = order.reduce((s, k) => s + (stats.status_breakdown[k] || 0), 0) || 1;
+  return (
+    <div className="card">
+      <h2>Status Breakdown</h2>
+      {order.map((k) => {
+        const count = stats.status_breakdown[k] || 0;
+        const pct = ((count / total) * 100).toFixed(0);
+        return (
+          <div className="cat-row" key={k}>
+            <span className={pillClass(k)}>{k}</span>
+            <span className="cat-meta">{count} ({pct}%)</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CategoryPanel({ stats }) {
+  if (!stats) return null;
+  const rows = [...stats.by_category].sort((a, b) => b.avg_risk_score - a.avg_risk_score);
+  return (
+    <div className="card">
+      <h2>By Category</h2>
+      {rows.map((c) => (
+        <div className="cat-row" key={c.category}>
+          <span className="cat-name">{c.category.replace(/_/g, " ")}</span>
+          <span className="cat-meta">n={c.count}, avg risk={c.avg_risk_score.toFixed(1)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConnectionBadge({ mode }) {
+  const label = mode === "live" ? "Live (WebSocket)" : mode === "poll" ? "Polling fallback" : "Disconnected";
+  const dotClass = mode === "live" ? "conn-live" : mode === "poll" ? "conn-poll" : "conn-down";
+  return <span className="badge"><span className={"conn-dot " + dotClass}></span>{label}</span>;
+}
+
+function App() {
+  const [records, setRecords] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [connMode, setConnMode] = useState("connecting");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [minRisk, setMinRisk] = useState("");
+  const wsRef = useRef(null);
+  const pollRef = useRef(null);
+
+  const fetchRecords = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: "100" });
+      if (categoryFilter) params.set("category", categoryFilter);
+      if (minRisk) params.set("min_risk", minRisk);
+      const res = await fetch(`${API_BASE}/records?${params.toString()}`);
+      const data = await res.json();
+      setRecords(data.items);
+    } catch (e) {
+      console.error("fetch records failed", e);
+    }
+  }, [categoryFilter, minRisk]);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/stats`);
+      const data = await res.json();
+      setStats(data);
+    } catch (e) {
+      console.error("fetch stats failed", e);
+    }
+  }, []);
+
+  // Initial load + stats polling (stats always polled regardless of WS state)
+  useEffect(() => {
+    fetchRecords();
+    fetchStats();
+    const statsInterval = setInterval(fetchStats, POLL_INTERVAL_MS);
+    return () => clearInterval(statsInterval);
+  }, [fetchRecords, fetchStats]);
+
+  // Re-fetch when filters change
+  useEffect(() => { fetchRecords(); }, [categoryFilter, minRisk]);
+
+  // WebSocket connection with polling fallback
+  useEffect(() => {
+    let cancelled = false;
+
+    function startPolling() {
+      setConnMode("poll");
+      if (pollRef.current) return;
+      pollRef.current = setInterval(fetchRecords, POLL_INTERVAL_MS);
+    }
+
+    function stopPolling() {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+
+    function connect() {
+      try {
+        const ws = new WebSocket(`${WS_BASE}/ws`);
+        wsRef.current = ws;
+        ws.onopen = () => {
+          if (cancelled) return;
+          setConnMode("live");
+          stopPolling();
+        };
+        ws.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === "new_record") {
+              setRecords((prev) => [msg.record, ...prev].slice(0, MAX_FEED_ROWS));
+              fetchStats();
+            }
+          } catch (e) { /* ignore malformed frame */ }
+        };
+        ws.onclose = () => {
+          if (cancelled) return;
+          setConnMode("down");
+          startPolling();
+          setTimeout(connect, 3000); // retry
+        };
+        ws.onerror = () => ws.close();
+      } catch (e) {
+        startPolling();
+      }
+    }
+
+    connect();
+    return () => {
+      cancelled = true;
+      stopPolling();
+      if (wsRef.current) wsRef.current.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const chartPoints = useMemo(() => {
+    return [...records]
+      .sort((a, b) => new Date(a.submitted_at) - new Date(b.submitted_at))
+      .slice(-MAX_CHART_POINTS);
+  }, [records]);
+
+  const categories = useMemo(() => {
+    const set = new Set(records.map((r) => r.category));
+    if (stats) stats.by_category.forEach((c) => set.add(c.category));
+    return [...set].sort();
+  }, [records, stats]);
+
+  return (
+    <React.Fragment>
+      <header>
+        <h1>RiskPulse <span style={{ color: "#8b93a7", fontWeight: 400 }}>&mdash; demo dashboard</span></h1>
+        <ConnectionBadge mode={connMode} />
+      </header>
+      <main>
+        <StatsPanel stats={stats} />
+        <StatusBreakdown stats={stats} />
+        <CategoryPanel stats={stats} />
+
+        <div className="card full-width">
+          <h2>Risk Score Trend (most recent records, chronological)</h2>
+          <RiskChart points={chartPoints} />
+        </div>
+
+        <div className="card full-width">
+          <h2>Live Feed</h2>
+          <div className="filters">
+            <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+              <option value="">All categories</option>
+              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <input
+              type="number"
+              placeholder="min risk score"
+              value={minRisk}
+              onChange={(e) => setMinRisk(e.target.value)}
+              min="0" max="100"
+              style={{ width: 130 }}
+            />
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Category</th>
+                  <th>Amount</th>
+                  <th>Applicant</th>
+                  <th>Risk Score</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {records.map((r) => (
+                  <tr key={r.id}>
+                    <td>{fmtTime(r.submitted_at)}</td>
+                    <td>{r.category.replace(/_/g, " ")}</td>
+                    <td>{fmtMoney(r.amount)}</td>
+                    <td>{r.applicant}</td>
+                    <td>{r.risk_score.toFixed(1)}</td>
+                    <td><span className={pillClass(r.status)}>{r.status}</span></td>
+                  </tr>
+                ))}
+                {records.length === 0 && (
+                  <tr><td colSpan="6" className="stat-sub">No records yet &mdash; run seed_and_simulate.py against the backend.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </main>
+      <footer>
+        <strong>About this demo:</strong> RiskPulse is an independent, open-source portfolio project.
+        All records shown here are <strong>synthetic, fabricated demo data</strong> generated by the
+        included <code>seed_and_simulate.py</code> script &mdash; nothing here represents real people,
+        accounts, or transactions. The risk score is produced by a simplified, rule-based +
+        basic-statistics scoring function for educational purposes only; it is <strong>not</strong> a
+        real financial risk model and is not affiliated with, derived from, or representative of any
+        employer's systems or data.
+      </footer>
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
