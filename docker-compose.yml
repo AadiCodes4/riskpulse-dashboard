@@ -1,0 +1,21 @@
+# RiskPulse demo stack.
+#
+# Brings up the FastAPI backend (with a SQLite volume so data survives
+# restarts). The frontend is a single static index.html with no build
+# step, so it isn't containerized here -- just open frontend/index.html
+# in a browser (see README.md) or serve it with any static file server,
+# e.g.:
+#   python3 -m http.server 5173 --directory frontend
+#
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - riskpulse-data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:////app/data/riskpulse.db
+
+volumes:
+  riskpulse-data:
